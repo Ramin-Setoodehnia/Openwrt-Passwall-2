@@ -1,4 +1,4 @@
-# openwrt-passwall-build
+# Openwrt-Passwall-Build
 
 Binary distribution of [xiaorouji/openwrt-passwall](https://github.com/xiaorouji/openwrt-passwall) built with official OpenWRT SDK.
 
