@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - current_version
+      - cur_ver.json
 
 jobs:
   generate_matrix:
@@ -16,11 +16,12 @@ jobs:
       matrix:
         ref:
           - main
+          - openwrt-21.02
           - openwrt-22.03
           - openwrt-23.05
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: openwrt/openwrt
           ref: ${{ matrix.ref }}
@@ -73,6 +74,8 @@ jobs:
         id: gather
         run: |
           result=$(jq -c '.sdks[]' <<< '${{ steps.read.outputs.result }}' | jq -c -s add)
+          # https://github.com/openwrt/docker/issues/135
+          result=$(jq -c '[., inputs | .[] | select(.arch != "loongarch64_generic")]' <<< ${result})
           echo "result=${result}" >> $GITHUB_OUTPUT
 
   release:
@@ -85,8 +88,21 @@ jobs:
         include: ${{ fromJson(needs.gather_matrix.outputs.result) }}
 
     steps:
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          swap-storage: false
+
+      - name: Setup Python 3
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install nvchecker
+        run: pip3 install nvchecker
+
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Get build path
         id: get_build_path
@@ -108,23 +124,22 @@ jobs:
       - name: Retrieve Version
         id: ver
         run: |
-          { read luci_ver; read pkgs_ver; read passwall2_ver; } < current_version
-          echo "luci=$luci_ver" >> $GITHUB_OUTPUT
-          echo "pkgs=$pkgs_ver" >> $GITHUB_OUTPUT
-          echo "passwall2=$passwall2_ver" >> $GITHUB_OUTPUT
+          cp cur_ver.json new_ver.json
+          vers=$(nvcmp -c nvchecker.toml -aj)
+          jq -cr 'map("\(.name)=\(.newver)") | .[]' <<< $vers >> $GITHUB_OUTPUT
 
-      # Use go from 23.05 for 22.03
+      # Use go from master for 21.02/22.03/23.05
       - name: Override golang version
-        if: matrix.ref == 'openwrt-22.03'
-        run: echo "GOLANG_COMMIT=openwrt-23.05" >> $GITHUB_ENV
+        if: contains(fromJSON('["openwrt-21.02", "openwrt-22.03", "openwrt-23.05"]'), matrix.ref)
+        run: echo "GOLANG_COMMIT=master" >> $GITHUB_ENV
 
       - name: Build Package
         uses: MoetaYuko/gh-action-sdk@master
         env:
           ARCH: ${{ matrix.arch }}-${{ matrix.ref }}
           EXTRA_FEEDS: >-
-            src-git|passwall_packages|https://github.com/xiaorouji/openwrt-passwall-packages^${{ steps.ver.outputs.pkgs }}
-            src-git|passwall_luci|https://github.com/xiaorouji/openwrt-passwall^${{ steps.ver.outputs.luci }}
+            src-git|passwall_packages|https://github.com/xiaorouji/openwrt-passwall-packages^${{ steps.ver.outputs.packages }}
+            src-git|passwall_luci|https://github.com/xiaorouji/openwrt-passwall^${{ steps.ver.outputs.passwall }}
             src-git|passwall2|https://github.com/xiaorouji/openwrt-passwall2^${{ steps.ver.outputs.passwall2 }}
           KEY_BUILD: ${{ secrets.SIGN_PRIV_KEY }}
           V: s
@@ -147,7 +162,7 @@ jobs:
           rsync -av --files-from=logs.txt logs/package/feeds/ dist/$LOG_DIR/
 
       - name: Upload Output Folder
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: openwrt-passwall-${{ matrix.arch }}-${{ matrix.ref }}
           path: dist/
@@ -160,18 +175,17 @@ jobs:
     needs: release
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Fetch All Builds
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: openwrt-passwall-*
+          merge-multiple: true
 
-      - name: Merge All Builds
-        run: |
-          mkdir dist
-          for d in openwrt-passwall-*; do
-            rsync -a $d/ dist
-          done
-          cp passwall.pub dist
+      - name: Add public key
+        run: cp passwall.pub dist/
 
       - name: Uploading package files
         uses: Burnett01/rsync-deployments@6.0.0
